@@ -3,7 +3,7 @@ import sqlite3
 import json
 import os
 from dotenv import load_dotenv
-from requests import post
+from requests import get
 
 # Load environment variables
 load_dotenv()
@@ -27,10 +27,11 @@ def get_token():
     }
     data = {"grant_type": "client_credentials"}
     
-    result = post(url, headers=headers, data=data)
+    result = get(url, headers=headers, data=data)
     json_result = json.loads(result.content)
     token = json_result["access_token"]
     return token
+
 
 def get_spotify_features(song_name, artist_name):
     token = get_token()
@@ -42,7 +43,7 @@ def get_spotify_features(song_name, artist_name):
 
     # Search for the song on Spotify
     search_url = f"https://api.spotify.com/v1/search?q={song_name} {artist_name}&type=track&limit=1"
-    search_result = post(search_url, headers=headers).json()
+    search_result = get(search_url, headers=headers).json()
     
     if search_result['tracks']['items']:
         song = search_result['tracks']['items'][0]
@@ -50,7 +51,7 @@ def get_spotify_features(song_name, artist_name):
         
         # Fetch audio features for the track
         features_url = f"https://api.spotify.com/v1/audio-features/{track_id}"
-        features = post(features_url, headers=headers).json()
+        features = get(features_url, headers=headers).json()
 
         # Extract relevant features
         return {
@@ -66,6 +67,7 @@ def get_spotify_features(song_name, artist_name):
             'mode': features['mode']
         }
     else:
+        print(f"Spotify search failed for: {song_name} by {artist_name}")
         return None
 
 import requests
@@ -95,7 +97,8 @@ def scrape_billboard_hot_100():
             # Add song title and artist name to the list as a tuple
             if song_title and artist_name:
                 songs.append((song_title, artist_name))
-
+    if not songs:
+        print("Error: Unable to scrape Billboard Hot 100 data. Verify the HTML structure.")
     return songs
 
 # PART 2 STORE THE DATA 
@@ -118,13 +121,10 @@ def insert_billboard_data(songs):
         )
     """)
     for song_name, artist_name in songs:
-        try:
             cursor.execute("""
                 INSERT OR IGNORE INTO BillboardSongs (song_name, artist_name) 
                 VALUES (?, ?)
-            """, (song_name.strip().lower(), artist_name.strip().lower()))
-        except sqlite3.IntegrityError:
-            print(f"Duplicate entry: {song_name} by {artist_name}")
+            """, (song_name.lower(), artist_name.lower()))
     conn.commit()
 
 # Insert Spotify features data
@@ -144,7 +144,86 @@ def insert_spotify_data(song_features):
             INSERT INTO SpotifyFeatures (song_id, danceability, tempo, energy)
             SELECT song_id, ?, ?, ? 
             FROM BillboardSongs 
-            WHERE song_name = ?
-        """, (song['danceability'], song['tempo'], song['energy'], song['song_name'].strip().lower()))
+            WHERE LOWER(song_name) = ? AND LOWER(artist_name) = ?
+        """, (song['danceability'], song['tempo'], song['energy'], song['song_name'].strip().lower(), song['artist_name'].strip.lower()))
     conn.commit()
+
+# STEP 3 CALCULATIONS 
+
+# Calculate average tempo and danceability
+def calculate_averages():
+    cursor.execute("""
+        SELECT AVG(sf.tempo) AS avg_tempo, AVG(sf.danceability) AS avg_danceability
+        FROM SpotifyFeatures AS sf
+    """)
+    result = cursor.fetchone()
+    with open("calculated_data.txt", "w") as file:
+        file.write(f"Average Tempo: {result[0]:.2f}\n")
+        file.write(f"Average Danceability: {result[1]:.2f}\n")
+        print("Calculations saved to calculated_data.txt")
+
+import matplotlib.pyplot as plt
+
+# Visualization: Scatter plot for tempo vs danceability
+def plot_tempo_vs_danceability():
+    cursor.execute("""
+        SELECT tempo, danceability
+        FROM SpotifyFeatures
+    """)
+    data = cursor.fetchall()
+    tempos = [row[0] for row in data]
+    danceabilities = [row[1] for row in data]
+    
+    plt.scatter(tempos, danceabilities, color='blue', alpha=0.5)
+    plt.xlabel("Tempo")
+    plt.ylabel("Danceability")
+    plt.title("Danceability vs Tempo")
+    plt.show()
+
+# Visualization: Bar chart of top 10 artists by number of songs
+def plot_top_artists():
+    cursor.execute("""
+        SELECT artist_name, COUNT(*) AS song_count
+        FROM BillboardSongs
+        GROUP BY artist_name
+        ORDER BY song_count DESC
+        LIMIT 10
+    """)
+    data = cursor.fetchall()
+    artists = [row[0] for row in data]
+    counts = [row[1] for row in data]
+
+    plt.bar(artists, counts, color='orange')
+    plt.xticks(rotation=45, ha='right')
+    plt.xlabel("Artists")
+    plt.ylabel("Number of Songs")
+    plt.title("Top 10 Artists by Number of Songs")
+    plt.show()
+
+
+def main():
+    # Gather Billboard data
+    billboard_songs = scrape_billboard_hot_100()
+    
+    # Limit to the first 50 songs
+    limited_songs = billboard_songs[:50]
+    
+    # Insert limited Billboard data
+    insert_billboard_data(limited_songs)
+
+    # Fetch Spotify features for limited songs
+    spotify_features = []
+    for song_name, artist_name in limited_songs:
+        feature = get_spotify_features(song_name, artist_name)
+        if feature:
+            spotify_features.append(feature)
+    insert_spotify_data(spotify_features)
+
+    # Perform calculations and visualize
+    calculate_averages()
+    plot_tempo_vs_danceability()
+    plot_top_artists()
+
+if __name__ == "__main__":
+    main()
 
